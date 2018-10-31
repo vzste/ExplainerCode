@@ -1,0 +1,363 @@
+---
+title: "Explainer function"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r  message=FALSE}
+explain <- function(x, 
+                    y, 
+                    data, 
+                    method, 
+                    na.action = na.omit, 
+                    fallen.leaves = TRUE, 
+                    split.border.col = 1, 
+                    box.palette = "auto", 
+                    n.trees=10000, 
+                    matching.method = "nearest", 
+                    trControl=NULL, 
+                    split.fun=NULL, ...) {
+  
+# Arguments:
+# x = dataframe or matrix
+# y = outcome vector
+# method = propensity score calculaiton method - one of "glm", "rpart", "rf", "cbps", "svm", "twang"
+# na.action = both for generating propensity scores and matchit
+# fallen.leaves = decision tree aesthetic 
+# split.border.col = color of the split box borders
+# box.palette = decision tree color scheme (default = greens)
+# n.trees = number of gbm iterations passed on to gbm (TWANG)
+# matching.method = specifies a matching method in MatchIt
+# trControl = defines trControl() function for caret's train()
+  
+    library(caret)
+    library(MatchIt)
+    library(rpart)
+    library(partykit)
+  
+    # combining names and creating dataframe
+    dat.new <- as.data.frame(cbind(y, x))
+    names(dat.new)[1] <- "y.var"
+    
+    if (is.null(trControl)) {
+        trControl = trainControl(method = "repeatedcv", repeats = 3)
+    }
+    
+    if (method == "glm") {
+        # logistic regression for propensity scores
+        lr1 <- glm(y.var ~ ., data = dat.new, family = "binomial", na.action = na.action)
+        # matching
+        m.out <- matchit(y.var ~ fitted(lr1, type = "prob"), data = dat.new, na.action = na.action, method = matching.method, 
+            replace = TRUE)
+        # indicator for matched/unmatched
+        newy <- ifelse(m.out$weight == 0, 0, 1)
+        newy <- factor(newy, levels = c(0, 1), labels = c("out", "in"))
+        dat.new$newy <- newy
+        # grow decision tree for determining matched/unmatched
+        tree1 <- train(x = x, y = newy, method = "rpart", trControl = trControl)
+        # plot tree
+        library(rpart.plot)
+        rpart.plot(tree1$finalModel, fallen.leaves = fallen.leaves, split.border.col = split.border.col, box.palette = box.palette, split.fun = split.fun)
+    } 
+    
+    else if (method == "rpart") {
+        y2 <- ifelse(dat.new$y.var==0, "no", "yes")
+        ps.tree1 <- train(x = x, y = y2, method = "rpart", trControl = trControl)
+        ps1 <- predict(ps.tree1$finalModel)[, 2]
+        dat.new$ps1 <- ps1
+        m.out2 <- matchit(y.var ~ ps1, data = dat.new, na.action = na.action, method = matching.method, replace = TRUE)
+        newy2 <- ifelse(m.out2$weight == 0, 0, 1)
+        dat.new$newy2 <- as.factor(newy2)
+        tree2 <- train(x = x, y = as.factor(newy2), method = "rpart", trControl = trControl)
+        rpart.plot(tree2$finalModel, fallen.leaves = fallen.leaves, split.border.col = split.border.col, box.palette = box.palette, split.fun = split.fun)
+    } 
+    
+    else if (method == "rf") {
+      library(randomForest)
+      y2 <- factor(dat.new$y.var, levels=c(0, 1), labels=c("no", "yes"))
+      ps.tree2 <- randomForest(x = x, y = y2, trControl = trControl, data=dat.new)
+      ps2 <- ps.tree2$votes[,2]
+      dat.new$ps2 <- ps2
+      m.out3 <- matchit(y.var ~ ps2,data=dat.new,na.action=na.action, method = matching.method, replace=TRUE)
+      newy3 <- ifelse(m.out3$weight==0, 0, 1)
+      dat.new$newy3 <- factor(newy3, levels=c(0,1), labels=c("out", "in"))
+      tree3 <- train(x = x, y = dat.new$newy3, method = "rpart", trControl = trControl)
+      rpart.plot(tree3$finalModel, fallen.leaves=fallen.leaves, split.border.col=split.border.col, box.palette = box.palette, split.fun = split.fun)
+    } 
+    
+    else if (method == "cbps") {
+      library(CBPS)
+      fit <- CBPS(y.var ~ ., data = dat.new, ATT = FALSE)
+      ps3 <- fitted(fit)
+      dat.new$ps3 <- ps3
+      m.out4 <- matchit(y.var~ps3,data=dat.new,na.action=na.action,method = matching.method, replace=TRUE)
+      newy4 <- ifelse(m.out4$weight==0, 0, 1)
+      dat.new$newy4 <- factor(newy4, levels=c(0,1), labels=c("out", "in"))
+      tree4 <- train(x = x, y = as.factor(dat.new$newy4), method = "rpart", trControl = trControl)
+      rpart.plot(tree4$finalModel, fallen.leaves=TRUE, split.border.col=split.border.col, box.palette = box.palette, split.fun=split.fun)
+    } 
+    
+    else if (method=="svm") {
+      dat.new$y.var <- as.factor(dat.new$y.var)
+      library(e1071)
+      attach(dat.new)
+      x2 <- data.matrix(x)
+      svm1 <- svm(x2,dat.new$y.var, probability=T)
+      ps4 <- predict(svm1, x2, probability=T)
+      dat.new$ps4 <- attr(ps4,"probabilities")[,1]
+      m.out5 <- matchit(y.var~ps4,data=dat.new,na.action=na.action,method=matching.method,replace=TRUE)
+      newy5 <- ifelse(m.out5$weight==0, 0, 1)
+      dat.new$newy5 <- factor(newy5, levels=c(0,1), labels=c("out", "in"))
+      tree5 <- train(x = x, y = dat.new$newy5, method = "rpart", trControl = trControl)
+      rpart.plot(tree5$finalModel, fallen.leaves=TRUE, split.border.col=1, box.palette = "Grays", split.fun=split.fun)
+    } 
+    
+    else if (method=="twang") {
+      library(twang)
+      dat.new2 <- dat.new
+      ps.hn<- ps(y.var ~ .,
+           dat.new2,
+           n.trees=n.trees,
+           interaction.depth=2,
+           shrinkage=0.01,
+           perm.test.iters=0,
+           stop.method=c("es.mean","ks.max"),
+           estimand = "ATE",
+           verbose=FALSE)
+      ps5 <- ps.hn[["ps"]][["es.mean.ATE"]]
+      m.out6 <- matchit(y.var ~ ps5, data=dat.new2, na.action=na.action, method=matching.method, replace=T)
+      newy6 <- ifelse(m.out6$weight==0, 0, 1)
+      dat.new2$newy6 <- factor(newy6, levels=c(0,1), labels=c("out", "in"))
+      tree6 <- train(x = x, y = dat.new2$newy6, method = "rpart", trControl = trControl)
+      rpart.plot(tree6$finalModel, fallen.leaves=fallen.leaves, split.border.col=split.border.col, box.palette = box.palette, split.fun=split.fun)
+    }
+}
+
+```
+
+
+```{r  message=FALSE, cache=TRUE}
+library(foreign)
+handn = read.csv("HandNRT.csv",header=F,skip=1)
+names(handn) = c("subjid","facid","factype","age","Female","Race","Insured","InsType","resid","dist","comorb","year","tstage","Nstage","Chemo","CancerSite","Dose","futime","death","completer")
+handn2 <- handn
+set.seed(520)
+handn2$Race[is.na(handn2$Race)] <- sample(c(0,1,2),size=31,replace=T,prob=table(handn$Race)/4011)
+handn3 <- handn2[,c(3:7,11:16)]
+
+# data frame for x variables
+z <- c("factype", "age", "Female", "Race", "comorb", "tstage", "Nstage", "CancerSite")
+x.mx <- data.frame(handn3[,z])
+x.mx$factype <- factor(x.mx$factype)
+x.mx$Age <- x.mx$age
+x.mx <- x.mx[,-2]
+x.mx$comorb <- as.factor(x.mx$comorb)
+x.mx$tstage <- as.factor(x.mx$tstage)
+x.mx$Nstage <- as.factor(x.mx$Nstage)
+x.mx$CancerSite <- as.factor(x.mx$CancerSite)
+x.mx$Female <- as.factor(x.mx$Female)
+x.mx$Race <- factor(x.mx$Race, levels=c(0,1,2), labels=c("white", "black", "other"))
+
+# y variable
+y <- handn3$Chemo
+
+# split label function for CART split labels
+split.function <- function(x, labs, digits, varlen, faclen)
+    {
+        # replace commas with spaces (needed for strwrap)
+        labs <- gsub("Nstage", "N-stage", labs)
+        for(i in 1:length(labs)) {
+            # split labs[i] into multiple lines
+            labs[i] <- paste(strwrap(labs[i], width = 15), collapse = "\n")
+        }
+labs }
+
+# run for each method
+set.seed(472)
+explain(x=x.mx, y=y, data=handn3, method="glm", box.palette = "Grays", split.fun = split.function)
+
+explain(x=x.mx, y=y, data=handn3, method="rpart", box.palette = "Grays", split.fun = split.function)
+
+explain(x=x.mx, y=y, data=handn3, method="rf", box.palette = "Grays", split.fun = split.function)
+
+explain(x=x.mx, y=y, data=handn3, method="cbps", box.palette = "Grays", split.fun = split.function)
+
+explain(x=x.mx, y=y, data=handn3, method="svm", box.palette = "Grays", split.fun = split.function)
+
+explain(x=x.mx, y=y, data=handn3, method="twang", box.palette = "Grays", split.fun = split.function)
+```
+
+Elderly GBM 3 outcome data
+
+```{r  message=FALSE}
+### Import all 3 sheets
+library(readxl)
+
+# sheet 1
+setwd("~/Desktop/explain/explainer_jones")
+
+chemo_RT <- read_excel("elderly GBM CRT PSM.xlsx", 
+    sheet = "Chemo_vs_RT")
+
+# sheet 2
+chemo_CRT <- read_excel("elderly GBM CRT PSM.xlsx", 
+    sheet = "Chemo_vs_CRT")
+
+# sheet 3
+RT_CRT <- read_excel("elderly GBM CRT PSM.xlsx", 
+    sheet = "RT_vs_CRT")
+
+
+### Chemo vs. RT
+# Treatment Groups: 
+# None (0) 
+# TMZ (1)
+# RT (2)
+# RT and TMZ (3)
+
+### Sheet 1
+names(chemo_RT) = c("id", "age", "age.5yr", "age.decade", "sex", "race", "CDCC", "year.cont", "year", "surgery", "treatment", "cr.fu", "cr.dead")
+
+## Labeling and re-coding
+# recoding treatment to 0=RT and 1=CT
+chemo_RT$treat <- ifelse(chemo_RT$treatment==1, 1, 0)
+# Age by 5yr: 65 to 69 (1); 70 to 74(2); 75 to 79 (3); 80plus (4)
+chemo_RT$age.5yr <- ordered(chemo_RT$age.5yr, levels = c(1, 2, 3, 4), labels = c("65-69", "70-74", "75-79", "80+"))
+# Surgery: No (0); Yes (1)
+chemo_RT$surgery <- factor(chemo_RT$surgery, levels = c(0, 1), labels = c("no", "yes"))
+# year
+chemo_RT$year <- ordered(chemo_RT$year, levels = c(0, 1), labels=c("2005-2008", "2009-2011"))
+# sex
+chemo_RT$sex <- factor(chemo_RT$sex, levels = c(1,2), labels=c("male", "female"))
+
+
+### Sheet 2
+names(chemo_CRT) = c("id", "age", "age.5yr", "age.decade", "sex", "race", "CDCC", "year.cont", "year", "surgery", "treatment", "cr.fu", "cr.dead")
+
+table(chemo_CRT$treatment, exclude=NULL)
+
+# Labeling and recoding
+# recoding treatment to 0=combined and 1=CT
+chemo_CRT$treat <- ifelse(chemo_CRT$treatment==1, 1, 0)
+# Age by 5yr: 65 to 69 (1); 70 to 74(2); 75 to 79 (3); 80plus (4)
+chemo_CRT$age.5yr <- ordered(chemo_CRT$age.5yr, levels = c(1, 2, 3, 4), labels = c("65-69", "70-74", "75-79", "80+"))
+# Surgery: No (0); Yes (1)
+chemo_CRT$surgery <- factor(chemo_CRT$surgery, levels = c(0, 1), labels = c("no", "yes"))
+# year
+chemo_CRT$year <- ordered(chemo_CRT$year, levels = c(0, 1), labels=c("2005-2008", "2009-2011"))
+# sex
+chemo_CRT$sex <- factor(chemo_CRT$sex, levels = c(1,2), labels=c("male", "female"))
+
+
+### Sheet 3
+# Treatment Groups: 
+# None (0). 
+# TMZ (1). 
+# RT (2). 
+# RT and TMZ (3)
+
+names(RT_CRT) = c("id", "age", "age.5yr", "age.decade", "sex", "race", "CDCC", "year.cont", "year", "surgery", "treatment", "cr.fu", "cr.dead")
+
+table(RT_CRT$treatment, exclude=NULL)
+
+# recoding treatment to 0=(RT and TMZ) and 1=RT
+RT_CRT$treat <- ifelse(RT_CRT$treatment==2, 1, 0)
+
+# labeling age and surgery values
+# Age by 5yr: 65 to 69 (1); 70 to 74(2); 75 to 79 (3); 80plus (4)
+RT_CRT$age.5yr <- ordered(RT_CRT$age.5yr, levels = c(1, 2, 3, 4), labels = c("65-69", "70-74", "75-79", "80+"))
+# Surgery: No (0); Yes (1)
+RT_CRT$surgery <- factor(RT_CRT$surgery, levels = c(0, 1), labels = c("no", "yes"))
+RT_CRT$year <- ordered(RT_CRT$year, levels = c(0, 1), labels=c("2005-2008", "2009-2011"))
+RT_CRT$sex <- factor(RT_CRT$sex, levels = c(1,2), labels=c("male", "female"))
+
+
+chemo_RT2 <- chemo_RT
+chemo_RT3 <- chemo_RT2[,c(2:7,9:11,14)]
+
+chemo_CRT2 <- chemo_CRT
+chemo_CRT3 <- chemo_CRT2[,c(2:7,9:11,14)]
+
+RT_CRT2 <- RT_CRT
+RT_CRT3 <- RT_CRT2[,c(2:7,9:11,14)]
+```
+
+```{r  message=FALSE}
+chemo_RT3$race <- factor(chemo_RT3$race, levels=c(1, 2, 3), labels=c("white", "black", "other"))
+chemo_RT3$sex <- as.factor(chemo_RT3$sex)
+chemo_RT3$CDCC <- as.factor(chemo_RT3$CDCC)
+
+z <- c("age.5yr", "sex", "race", "CDCC", "year", "surgery")
+rt.x <- as.data.frame(chemo_RT3[,z])
+names(rt.x)[1] <- "age"
+
+y <- chemo_RT3$treat
+
+explain(x=rt.x, y=y, chemo_RT3, method="glm", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_RT3, method="rpart", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_RT3, method="rf", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_RT3, method="cbps", box.palette = "Grays")
+
+set.seed(56)
+explain(x=rt.x, y=y, chemo_RT3, method="svm", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_RT3, method="twang", box.palette = "Grays")
+```
+
+```{r  message=FALSE}
+chemo_CRT3$race <- factor(chemo_CRT3$race, levels=c(1, 2, 3), labels=c("white", "black", "other"))
+chemo_CRT3$sex <- as.factor(chemo_CRT3$sex)
+chemo_CRT3$CDCC <- as.factor(chemo_CRT3$CDCC)
+
+z <- c("age.5yr", "sex", "race", "CDCC", "year", "surgery")
+rt.x <- data.frame(chemo_CRT3[,z])
+names(rt.x)[1] <- "age"
+
+y <- chemo_CRT3$treat
+
+explain(x=rt.x, y=y, chemo_CRT3, method="glm", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_CRT3, method="rpart", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_CRT3, method="rf", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_CRT3, method="cbps", box.palette = "Grays")
+
+set.seed(56)
+explain(x=rt.x, y=y, chemo_CRT3, method="svm", box.palette = "Grays")
+
+explain(x=rt.x, y=y, chemo_CRT3, method="twang", box.palette = "Grays")
+```
+
+```{r  message=FALSE}
+RT_CRT3$race <- factor(RT_CRT3$race, levels=c(1, 2, 3), labels=c("white", "black", "other"))
+RT_CRT3$sex <- as.factor(RT_CRT3$sex)
+RT_CRT3$CDCC <- as.factor(RT_CRT3$CDCC)
+
+z <- c("age.5yr", "sex", "race", "CDCC", "year", "surgery")
+rt.x <- data.frame(RT_CRT3[,z])
+names(rt.x)[1] <- "age"
+
+y <- RT_CRT3$treat
+
+explain(x=rt.x, y=y, RT_CRT3, method="glm", box.palette = "Grays")
+
+explain(x=rt.x, y=y, RT_CRT3, method="rpart", box.palette = "Grays")
+
+explain(x=rt.x, y=y, RT_CRT3, method="rf", box.palette = "Grays")
+
+explain(x=rt.x, y=y, RT_CRT3, method="cbps", box.palette = "Grays")
+
+set.seed(56)
+explain(x=rt.x, y=y, RT_CRT3, method="svm", box.palette = "Grays")
+
+explain(x=rt.x, y=y, RT_CRT3, method="twang", box.palette = "Grays")
+```
